@@ -1,33 +1,147 @@
-// 只移除指定类型的事件监听器，而不破坏其他事件
-//在需要使用的网页按f12后，在控制台里复制如下代码
-function removeSpecificEvents(target, eventTypes) {
-    if (!target || !target.addEventListener) return;
-    
-    // 获取目标对象上的所有事件监听器（仅限 Chrome 开发者工具环境，普通网页无法获取）
-    // 由于我们不能直接获取，改用另一种策略：拦截并阻止这些事件的传播/默认行为
-    
-    // 策略：在捕获阶段阻止这些事件，使它们无法到达页面原生的监听器
-    eventTypes.forEach(type => {
-        target.addEventListener(type, (e) => {
-            e.stopPropagation();
-            e.stopImmediatePropagation(); // 阻止同一元素上的其他监听器
-        }, true); // 使用捕获阶段，优先级最高
-    });
-    console.log(`✅ 已阻止 ${eventTypes.join(', ')} 事件传递`);
-}
+// ==UserScript==
+// @name         超星自动点击视频区域
+// @namespace    http://tampermonkey.net/
+// @version      6.0
+// @description  自动点击视频画面区域启动播放，支持深层iframe
+// @match        *://*.chaoxing.com/*
+// @grant        none
+// ==/UserScript==
 
-// 对 window 和 document 阻止失焦/切屏事件
-const blockEvents = ['blur', 'mouseout', 'mouseleave', 'visibilitychange', 'mousemove', 'mouseover'];
-removeSpecificEvents(window, blockEvents);
-removeSpecificEvents(document, blockEvents);
+(function() {
+    'use strict';
 
-// 对于 body 或特定容器，也可以同样处理（但不替换 body）
-removeSpecificEvents(document.body, blockEvents);
+    // 屏蔽失焦/切屏（与之前相同，略）
+    function removeEvents(target, types) {
+        if (!target || !target.addEventListener) return;
+        types.forEach(type => {
+            target.addEventListener(type, (e) => {
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }, true);
+        });
+    }
+    const blockList = ['blur', 'mouseout', 'mouseleave', 'visibilitychange', 'mousemove', 'mouseover'];
+    removeEvents(window, blockList);
+    removeEvents(document, blockList);
+    removeEvents(document.body, blockList);
+    const container = document.querySelector('.course_main, .video-container, iframe');
+    if (container) removeEvents(container, blockList);
+    console.log('✅ 已屏蔽失焦/切屏检测');
 
-// 额外：如果想确保视频区域不会被检测到鼠标移出，只针对视频容器做阻止即可
-const videoContainer = document.querySelector('.course_main, .video-container, iframe');
-if (videoContainer) {
-    removeSpecificEvents(videoContainer, blockEvents);
-}
+    // 测验检测（简写，完整版可自行添加）
+    function isQuiz() {
+        const active = document.querySelector('.posCatalog_active');
+        if (active) {
+            const title = active.querySelector('.chapterName, .catalog_name');
+            if (title && /(测验|测试|考试|单元测试)/i.test(title.textContent)) return true;
+        }
+        return false;
+    }
 
-console.log('🎯 已只移除失焦/切屏类事件，click 功能不受影响');
+    // 完成检测
+    function isFinished() {
+        const active = document.querySelector('.posCatalog_active');
+        if (active && active.querySelector('.prevHoverTips')?.textContent.includes('已完成')) return true;
+        return false;
+    }
+
+    // 递归查找所有iframe（获取最内层包含视频的文档）
+    function getDeepestIframeDocument(iframe) {
+        let doc = iframe.contentDocument;
+        if (!doc) return null;
+        const innerIframe = doc.querySelector('iframe');
+        if (innerIframe && innerIframe.contentDocument) {
+            return getDeepestIframeDocument(innerIframe);
+        }
+        return doc;
+    }
+
+    // 点击视频区域的核心函数
+    function clickVideoArea() {
+        // 找到最内层的视频文档
+        const outerIframe = document.querySelector('.course_main iframe');
+        if (!outerIframe) return false;
+
+        let videoDoc = outerIframe.contentDocument;
+        if (!videoDoc) return false;
+
+        // 尝试深入嵌套iframe
+        const innerIframe = videoDoc.querySelector('iframe');
+        if (innerIframe && innerIframe.contentDocument) {
+            videoDoc = innerIframe.contentDocument;
+        }
+
+        // 等待一小段时间确保播放器完全加载
+        setTimeout(() => {
+            // 1. 尝试点击播放按钮
+            const playBtn = videoDoc.querySelector('button.vjs-big-play-button, .vjs-big-play-button, .vjs-play-control');
+            if (playBtn && playBtn.offsetParent !== null) {
+                playBtn.click();
+                console.log('🖱️ 点击播放按钮成功');
+                return true;
+            }
+
+            // 2. 尝试点击视频容器区域（如 .vjs-bgmark, .vjs-tech, video 本身）
+            const clickTargets = [
+                videoDoc.querySelector('.vjs-bgmark'),  // 你图中显示的元素
+                videoDoc.querySelector('.vjs-tech'),
+                videoDoc.querySelector('video'),
+                videoDoc.querySelector('.video-js')
+            ].filter(el => el && el.offsetParent !== null);
+
+            for (let target of clickTargets) {
+                target.click();
+                console.log(`🖱️ 点击视频区域: ${target.tagName}.${target.className}`);
+                return true;
+            }
+
+            console.warn('❌ 未找到可点击的视频元素');
+            return false;
+        }, 2000); // 延迟2秒，等待播放器初始化
+    }
+
+    const processed = new WeakSet();
+    function tryAutoPlay() {
+        if (isQuiz()) {
+            console.log('📌 测验章节，跳过自动播放');
+            return;
+        }
+        if (isFinished()) return;
+
+        const iframe = document.querySelector('.course_main iframe');
+        if (!iframe) return;
+
+        if (processed.has(iframe)) return;
+
+        if (iframe.contentDocument && iframe.contentDocument.readyState === 'complete') {
+            clickVideoArea();
+            processed.add(iframe);
+        } else {
+            iframe.addEventListener('load', () => tryAutoPlay(), { once: true });
+        }
+    }
+
+    // 自动跳转
+    let timer = null;
+    function autoNext() {
+        if (isQuiz()) {
+            console.log('⚠️ 测验章节，暂停自动跳转');
+            return;
+        }
+        if (isFinished()) {
+            const nextBtn = document.querySelector('#prevNextFocusNext');
+            if (nextBtn && window.getComputedStyle(nextBtn).display !== 'none') {
+                console.log('⏩ 点击下一节');
+                nextBtn.click();
+            } else {
+                console.log('🏁 课程结束');
+                if (timer) clearInterval(timer);
+            }
+        } else {
+            tryAutoPlay();
+        }
+    }
+
+    timer = setInterval(autoNext, 8000);
+    console.log('🚀 脚本已启动，将自动点击视频区域');
+})();
